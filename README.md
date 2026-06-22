@@ -84,7 +84,7 @@ flowchart TD
 |---|---|---|
 | **[`nvidia/TechQA-RAG-Eval`](https://huggingface.co/datasets/nvidia/TechQA-RAG-Eval)** | Primary QA benchmark — real IBM tech-support questions, many genuinely unanswerable from the provided docs | 910 examples → 610 answerable / 300 unanswerable |
 | **Derived document corpus** | Chunked source documents used for retrieval | 1,379 chunks from 496 unique IBM support documents (360-word chunks, 80-word overlap) |
-| **[RAGTruth](https://github.com/ParticleMedia/RAGTruth)** | External hallucination-labeled corpus, used only to train the auxiliary hallucination-risk classifier | 17,790 responses → 5,934 QA-task responses (29.1% contain a labeled hallucination) |
+| **[RAGTruth](DataSets/RAGTruth.md)** | External hallucination-labeled corpus, used only to train the auxiliary hallucination-risk classifier | 17,790 responses → 5,934 QA-task responses (29.1% contain a labeled hallucination) |
 
 **Train / Validation / Test split** (stratified by answerability):
 
@@ -341,7 +341,7 @@ All key knobs live in **Cell 3** (Runtime Configuration):
 ## Acknowledgments & Citations
 
 - **TechQA-RAG-Eval** dataset — [`nvidia/TechQA-RAG-Eval`](https://huggingface.co/datasets/nvidia/TechQA-RAG-Eval) on Hugging Face.
-- **RAGTruth** — [ParticleMedia/RAGTruth](https://github.com/ParticleMedia/RAGTruth), used here for training the auxiliary hallucination-risk classifier.
+- **RAGTruth** — [ParticleMedia/RAGTruth](DataSets/RAGTruth.md), used here for training the auxiliary hallucination-risk classifier.
 - **Models:** [`google/flan-t5-large`](https://huggingface.co/google/flan-t5-large), [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), [`microsoft/deberta-base-mnli`](https://huggingface.co/microsoft/deberta-base-mnli) (BERTScore backbone).
 - Built with 🤗 Transformers, Sentence-Transformers, `rank_bm25`, scikit-learn, `rouge-score`, `bert-score`, and seaborn/matplotlib.
 
