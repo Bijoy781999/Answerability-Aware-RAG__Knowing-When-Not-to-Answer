@@ -1,62 +1,82 @@
 # Datasets
 
-This directory contains documentation for the benchmark datasets used to develop and evaluate the **Answerability-Aware Retrieval-Augmented Generation (AURA-RAG)** framework.
+This directory provides information about the benchmark datasets used to evaluate the **Answerability-Aware Retrieval-Augmented Generation (AURA-RAG)** framework.
 
-> **Important**
+> **Note**
 >
-> The datasets are **not included** in this repository due to licensing restrictions and repository size limitations. Please download them directly from their official sources.
+> Due to licensing restrictions and repository size limitations, the datasets are **not included** in this repository. Please download them from their official sources before reproducing the experiments.
 
 ---
 
 ## Datasets Used
 
+The project is evaluated using two publicly available benchmark datasets:
+
 | Dataset | Purpose |
 |----------|---------|
-| TechQA-RAG-Eval | Retrieval-Augmented Generation evaluation on technical documentation |
-| RAGTruth | Hallucination detection and claim-level hallucination analysis |
+| TechQA-RAG-Eval | Retrieval-Augmented Generation evaluation |
+| RAGTruth | Hallucination detection and analysis |
 
 ---
 
-## Dataset Documentation
+## Directory Structure
 
-This directory includes:
-
-| File | Description |
-|------|-------------|
-| `techqa_rag_eval.md` | Overview and usage of the TechQA-RAG-Eval benchmark |
-| `ragtruth.md` | Overview and usage of the RAGTruth benchmark |
+```
+datasets/
+│
+├── README.md
+├── techqa_rag_eval.md
+├── ragtruth.md
+└── dataset_download_links.md
+```
 
 ---
 
 ## Why These Datasets?
 
-The proposed framework requires evaluating multiple aspects of Retrieval-Augmented Generation systems, including:
-
-- Hybrid retrieval effectiveness
-- Answerability prediction
-- Adaptive decision making
-- Hallucination mitigation
-- Response quality
-- Probability calibration
-
-No single benchmark covers all of these evaluation dimensions. Therefore, two complementary datasets are used.
-
----
-
-## Dataset Download
+These datasets complement each other by evaluating different aspects of Retrieval-Augmented Generation systems.
 
 ### TechQA-RAG-Eval
 
-https://huggingface.co/datasets/nvidia/TechQA-RAG-Eval
+Used for evaluating:
+
+- Hybrid Retrieval
+- Answerability Classification
+- Response Generation
+- End-to-End RAG Performance
 
 ---
 
 ### RAGTruth
 
-https://github.com/ParticleMedia/RAGTruth
+Used for evaluating:
+
+- Hallucination Detection
+- Hallucination Risk Prediction
+- Claim-Level Support Analysis
+- Safety Evaluation
+
+---
+
+## Dataset Preparation
+
+The preprocessing pipeline includes:
+
+1. Document Cleaning
+2. Text Normalization
+3. Text Chunking
+4. BM25 Index Construction
+5. Dense Embedding Generation
+6. Hybrid Retrieval Indexing
+
+---
+
+## Download
+
+Please refer to [**dataset_download_links.md**](dataset_download_links.md) for official download links.
 
 ---
 
 ## Citation
 
-If you use these datasets in your own research, please cite the original dataset authors according to their official documentation.
+If you use these datasets in academic work, please cite the original dataset authors.
