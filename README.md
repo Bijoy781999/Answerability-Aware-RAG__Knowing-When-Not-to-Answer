@@ -1,5 +1,6 @@
 <h1 align="center">
-🛡️ Answerability-Aware RAG: Knowing When Not to Answer
+  <img src="assets/logo.png" alt="AURA-RAG Logo" width="45" align="center">
+  Answerability-Aware RAG: Knowing When Not to Answer
 </h1>
 
 <p align="center">
