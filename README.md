@@ -293,7 +293,7 @@ This repository does **not** include the datasets.
 
 Download them using the instructions provided in:
 
-- 📄 `datasets/dataset_download_links.md`
+- 📄 [`datasets/dataset_download_links.md`](datasets/dataset_download_links.md)
 
 Supported datasets:
 
