@@ -1,0 +1,17 @@
+torch
+transformers
+sentence-transformers
+faiss-cpu
+rank-bm25
+datasets
+huggingface_hub
+numpy
+pandas
+matplotlib
+scikit-learn
+bert-score
+rouge-score
+evaluate
+nltk
+tqdm
+scipy
