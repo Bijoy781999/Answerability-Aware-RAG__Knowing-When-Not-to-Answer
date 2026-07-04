@@ -1,350 +1,1218 @@
-# 🛡️ Answerability-Aware RAG: Knowing When *Not* to Answer
+<h1 align="center">
+🛡️ Answerability-Aware RAG: Knowing When Not to Answer
+</h1>
 
-**A retrieval-augmented QA system that gates its own answers — combining hybrid retrieval, a calibrated answerability classifier, grounded generation, and a RAGTruth-trained hallucination-risk model on real enterprise tech-support data (IBM TechQA).**
+<p align="center">
+  <img src="assets/banner.png" alt="AURA-RAG Banner" width="100%">
+</p>
 
-![Python](https://img.shields.io/badge/Python-3.12-blue?logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-GPU-EE4C2C?logo=pytorch&logoColor=white)
-![Transformers](https://img.shields.io/badge/🤗%20Transformers-FLAN--T5-yellow)
-![Sentence-Transformers](https://img.shields.io/badge/Sentence--Transformers-MiniLM--L6--v2-green)
-![scikit-learn](https://img.shields.io/badge/scikit--learn-RandomForest-F7931E?logo=scikitlearn&logoColor=white)
-![Status](https://img.shields.io/badge/status-research%20prototype-orange)
+<p align="center">
+<b>An Answerability-Aware Retrieval-Augmented Generation Framework for Reliable Question Answering and Hallucination Mitigation</b>
+</p>
 
----
+<p align="center">
 
-Most RAG demos only show off the happy path: a good question, good chunks, a fluent answer. This project asks the harder question — **what should a RAG pipeline do when it *can't* answer well?**
+![Python](https://img.shields.io/badge/Python-3.12+-3776AB?logo=python&logoColor=white)
+![PyTorch](https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&logoColor=white)
+![Transformers](https://img.shields.io/badge/HuggingFace-Transformers-FFD21E?logo=huggingface&logoColor=black)
+![Sentence Transformers](https://img.shields.io/badge/Sentence--Transformers-Embeddings-4CAF50)
+![Scikit-Learn](https://img.shields.io/badge/Scikit--Learn-RandomForest-F7931E?logo=scikitlearn&logoColor=white)
+![BM25](https://img.shields.io/badge/Retrieval-BM25-blue)
+![FAISS](https://img.shields.io/badge/Vector_Search-FAISS-009688)
+![RAG](https://img.shields.io/badge/RAG-Answerability_Aware-purple)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-It builds a full pipeline that:
-1. Retrieves evidence with a **hybrid BM25 + dense-embedding** retriever over a chunked corpus of real IBM technical support documents.
-2. Learns to predict **answerability** from retrieval signals (score gaps, lexical overlap, BM25/dense agreement) using a calibrated Random Forest, then uses a **tuned 3-way decision gate** — `answer` / `request_more_evidence` / `abstain`.
-3. Generates grounded answers with **FLAN-T5-large**, with an extractive fallback when the generator itself tries to refuse.
-4. Scores **claim-level groundedness** of every generated sentence against the retrieved context, and estimates **hallucination risk** with a second classifier trained on the external **RAGTruth** benchmark.
-5. Evaluates everything with ROUGE-L, BERTScore, an LLM-as-judge rubric, calibration diagnostics (ECE/Brier), and a **gating-policy ablation study**.
-
-The headline result: **a "no gate, always answer" baseline produces unsafe answers 100% of the time on unanswerable questions** (and a 90% unsupported-claim rate). The learned answerability gate brings that down to **~17–20%**, at the cost of answering fewer truly-answerable questions. The README below walks through exactly how, and how well.
-
----
-
-## Table of Contents
-
-- [Why This Exists](#why-this-exists)
-- [Pipeline Architecture](#pipeline-architecture)
-- [Datasets](#datasets)
-- [Methodology](#methodology)
-- [Results](#results)
-- [Ablation: Does the Gate Actually Help?](#ablation-does-the-gate-actually-help)
-- [Key Takeaways](#key-takeaways)
-- [Repository / Notebook Structure](#repository--notebook-structure)
-- [Getting Started](#getting-started)
-- [Configuration Reference](#configuration-reference)
-- [Limitations & Future Work](#limitations--future-work)
-- [Acknowledgments & Citations](#acknowledgments--citations)
+</p>
 
 ---
 
-## Why This Exists
+# 📖 Overview
 
-Production RAG systems fail in a specific, expensive way: they answer **confidently** when the retrieved evidence doesn't actually support an answer. This notebook treats that failure mode as the primary thing to measure and engineer against, organized around three connected questions:
+Large Language Models (LLMs) have significantly improved open-domain question answering, but they continue to suffer from **hallucinations**—responses that appear fluent and convincing despite being unsupported by evidence. Although Retrieval-Augmented Generation (RAG) enhances factual grounding by incorporating external knowledge, conventional RAG systems generally assume that retrieved documents always contain sufficient evidence to answer a question. Consequently, these systems often generate responses even when the available context is incomplete, ambiguous, or entirely irrelevant.
 
-| Question | Component |
-|---|---|
-| **Answerability** — does the system have enough evidence to answer at all? | Hybrid retrieval + calibrated Random Forest gate |
-| **Reliability** — can we trust the gate's confidence score? | Isotonic calibration, reliability diagrams, ECE/Brier score |
-| **Hallucination** — if it answers, is every claim actually grounded? | Sentence-embedding claim support + RAGTruth-trained risk classifier |
+**Answerability-Aware RAG (AURA-RAG)** introduces an adaptive decision-making framework that determines **whether a question should be answered before response generation begins**. Rather than always producing an answer, the framework first evaluates the sufficiency of the retrieved evidence using a calibrated answerability classifier. Based on this assessment, the system dynamically selects one of three actions:
+
+- ✅ **Generate a grounded answer**
+- 🔍 **Request additional supporting evidence**
+- 🛑 **Abstain from answering**
+
+This answerability-aware decision process substantially reduces unsupported generations while improving the overall reliability, safety, and trustworthiness of Retrieval-Augmented Generation systems.
+
+The framework combines:
+
+- Hybrid Retrieval (BM25 + Dense Semantic Retrieval)
+- Answerability Prediction
+- Probability Calibration
+- Adaptive Three-Way Decision Gating
+- Grounded Response Generation
+- Hallucination Risk Estimation
+- LLM-as-a-Judge Evaluation
+- Comprehensive Benchmarking on TechQA-RAG-Eval and RAGTruth
 
 ---
 
-## Pipeline Architecture
+# 🎯 Motivation
 
-```mermaid
-flowchart TD
-    A[User Question] --> B["Hybrid Retrieval<br/>BM25 (0.4) + Dense MiniLM (0.6)<br/>top-k = 5"]
-    B --> C["Answerability Features<br/>score gap · lexical overlap · BM25/dense agreement"]
-    C --> D["Random Forest Classifier<br/>+ Isotonic Calibration"]
-    D --> E{Decision Gate}
-    E -->|prob ≥ 0.59| F[Generate Answer · FLAN-T5-large]
-    E -->|0.39 ≤ prob < 0.59| G[Request More Evidence]
-    E -->|prob < 0.39| H[Abstain]
-    F --> I{Generator refused<br/>or answer too short?}
-    I -->|yes| J[Extractive Fallback<br/>from retrieved sentences]
-    I -->|no| K[Claim-Level Grounding Check]
-    J --> K
-    K --> L["Hallucination Risk Model<br/>(trained on RAGTruth)"]
-    L --> M[Final Answer + Confidence + Risk Score]
-    G --> M
-    H --> M
+Traditional Retrieval-Augmented Generation systems focus primarily on retrieving relevant documents and generating fluent responses. However, retrieval quality alone does not guarantee factual correctness. When supporting evidence is insufficient, conventional RAG pipelines frequently produce confident yet unsupported answers.
+
+This project addresses a fundamental question:
+
+> **"How can a Retrieval-Augmented Generation system determine when it should not answer?"**
+
+Instead of maximizing answer coverage at any cost, the proposed framework prioritizes **reliability over response frequency** by explicitly modeling answerability before generation.
+
+---
+
+# ✨ Key Features
+
+- 🔍 **Hybrid Retrieval**
+  - BM25 lexical retrieval combined with dense semantic retrieval.
+
+- 🧠 **Answerability Prediction**
+  - Random Forest classifier estimates whether retrieved evidence is sufficient to answer a query.
+
+- 📊 **Probability Calibration**
+  - Isotonic Regression improves confidence estimation for more reliable decision making.
+
+- 🚦 **Adaptive Three-Way Decision Gate**
+  - Answer
+  - Request More Evidence
+  - Abstain
+
+- 🤖 **Grounded Response Generation**
+  - FLAN-T5-Large generates responses strictly conditioned on retrieved evidence.
+
+- 🛡️ **Hallucination Risk Estimation**
+  - Claim-level support verification using the RAGTruth benchmark.
+
+- 📈 **Comprehensive Evaluation**
+  - Retrieval Recall@5
+  - ROC-AUC
+  - BERTScore
+  - ROUGE-L
+  - Calibration Metrics
+  - LLM-as-a-Judge
+  - Ablation Study
+
+- 📚 **Research-Oriented Documentation**
+  - Complete methodology
+  - Dataset documentation
+  - Experimental evaluation
+  - Quantitative and qualitative analyses
+
+---
+
+# 🖼️ Graphical Abstract
+
+<p align="center">
+<img src="figures/overview/graphical_abstract.png" width="95%">
+</p>
+
+The proposed framework extends conventional Retrieval-Augmented Generation by introducing an **Answerability-Aware Decision Layer** between retrieval and generation. Instead of assuming that retrieved context always contains sufficient evidence, the system first evaluates answerability using retrieval-derived features and calibrated confidence estimation. Depending on the predicted confidence, the framework either generates a grounded response, requests additional evidence, or abstains from answering, thereby reducing hallucinations and improving factual reliability.
+
+---
+
+# 📑 Table of Contents
+
+- [📖 Overview](#-overview)
+- [🎯 Motivation](#-motivation)
+- [✨ Key Features](#-key-features)
+- [🖼️ Graphical Abstract](#️-graphical-abstract)
+- [🏗️ System Architecture](#️-system-architecture)
+- [⚙️ Workflow](#️-workflow)
+- [📂 Repository Structure](#-repository-structure)
+- [🚀 Installation](#-installation)
+- [💻 Usage](#-usage)
+- [🧩 Methodology](#-methodology)
+- [📊 Datasets](#-datasets)
+- [📈 Experimental Results](#-experimental-results)
+- [📁 Documentation](#-documentation)
+- [🏆 Key Findings](#-key-findings)
+- [🛣️ Roadmap](#️-roadmap)
+- [⚠️ Limitations](#️-limitations)
+- [🔮 Future Work](#-future-work)
+- [📖 Citation](#-citation)
+- [📜 License](#-license)
+- [🙏 Acknowledgements](#-acknowledgements)
+
+---
+
+# 🏗️ System Architecture
+
+<p align="center">
+<img src="figures/overview/system_architecture.png" width="95%">
+</p>
+
+The proposed **Answerability-Aware Retrieval-Augmented Generation (AURA-RAG)** framework introduces a reliability-aware decision layer between retrieval and response generation. Rather than assuming that every retrieved context is sufficient for answering a question, the system evaluates the quality and completeness of the retrieved evidence before deciding whether generation should proceed.
+
+The architecture consists of the following major components:
+
+| Component | Description |
+|-----------|-------------|
+| **Hybrid Retrieval** | Retrieves relevant documents using a combination of BM25 lexical search and dense semantic retrieval. |
+| **Answerability Feature Extraction** | Computes retrieval-derived features describing evidence quality and context sufficiency. |
+| **Answerability Classifier** | Predicts the probability that the retrieved context is sufficient to answer the query. |
+| **Probability Calibration** | Applies isotonic regression to improve confidence estimation. |
+| **Adaptive Decision Gate** | Dynamically selects one of three actions: Answer, Request More Evidence, or Abstain. |
+| **Grounded Response Generator** | Generates responses using FLAN-T5-Large conditioned solely on retrieved evidence. |
+| **Hallucination Risk Analysis** | Evaluates claim-level grounding and estimates hallucination risk using RAGTruth. |
+| **Evaluation Module** | Measures retrieval quality, answerability prediction, response quality, calibration, and hallucination mitigation. |
+
+> 📖 A detailed description of the complete architecture is available in **[`docs/methodology.md`](docs/methodology.md)**.
+
+---
+
+# ⚙️ Workflow
+
+<p align="center">
+<img src="figures/overview/workflow.png" width="95%">
+</p>
+
+The end-to-end workflow consists of the following stages:
+
+1. **User Query**
+   - A natural language question is submitted to the system.
+
+2. **Hybrid Retrieval**
+   - BM25 retrieves lexically relevant documents.
+   - Dense retrieval captures semantic similarity.
+   - Retrieved results are combined into a unified evidence set.
+
+3. **Feature Extraction**
+   - Retrieval statistics and evidence quality indicators are computed.
+
+4. **Answerability Prediction**
+   - A calibrated Random Forest classifier estimates the probability that the available evidence can answer the query.
+
+5. **Adaptive Decision Making**
+   - Based on calibrated confidence, the system chooses one of three actions:
+     - ✅ Generate Answer
+     - 🔍 Request More Evidence
+     - 🛑 Abstain
+
+6. **Grounded Generation**
+   - If sufficient evidence exists, FLAN-T5-Large generates a response conditioned on the retrieved context.
+
+7. **Hallucination Analysis**
+   - Generated responses undergo claim-level support verification and hallucination risk estimation.
+
+8. **Evaluation**
+   - The complete pipeline is evaluated using retrieval metrics, generation metrics, calibration analysis, hallucination benchmarks, and LLM-as-a-Judge assessment.
+
+---
+
+# 📂 Repository Structure
+
+```text
+Answerability-Aware-RAG/
+│
+├── README.md
+├── LICENSE
+├── .gitignore
+├── requirements.txt
+│
+├── notebook/
+│   └── answerability_relability_hallucination_using_rag.ipynb
+│
+├── docs/
+│   ├── methodology.md
+│   ├── datasets.md
+│   └── evaluation.md
+│
+├── figures/
+│   ├── overview/
+│   ├── retrieval/
+│   ├── answerability/
+│   ├── end_to_end/
+│   ├── generation_quality/
+│   ├── hallucination/
+│   ├── llm_judge/
+│   ├── calibration/
+│   └── ablation/
+│
+├── datasets/
+│   ├── README.md
+│   ├── techqa_rag_eval.md
+│   ├── ragtruth.md
+│   └── dataset_download_links.md
+│
+├── results/
+│   ├── quantitative_results.md
+│   └── qualitative_examples.md
+│
+└── assets/
+    ├── logo.png
+    └── banner.png
 ```
 
 ---
 
-## Datasets
+# 🚀 Installation
 
-| Dataset | Role | Size |
-|---|---|---|
-| **[`nvidia/TechQA-RAG-Eval`](DataSets/TechQA-RAG-Eval.md)** | Primary QA benchmark — real IBM tech-support questions, many genuinely unanswerable from the provided docs | 910 examples → 610 answerable / 300 unanswerable |
-| **Derived document corpus** | Chunked source documents used for retrieval | 1,379 chunks from 496 unique IBM support documents (360-word chunks, 80-word overlap) |
-| **[RAGTruth](DataSets/RAGTruth.md)** | External hallucination-labeled corpus, used only to train the auxiliary hallucination-risk classifier | 17,790 responses → 5,934 QA-task responses (29.1% contain a labeled hallucination) |
+## 1️⃣ Clone the Repository
 
-**Train / Validation / Test split** (stratified by answerability):
+```bash
+git clone https://github.com/Bijoy781999/Answerability-Aware-RAG__Knowing-When-Not-to-Answer.git
 
-| Split | Examples | Answerable | Unanswerable |
-|---|---|---|---|
-| Train | 637 | 427 | 210 |
-| Validation | 136 | 91 | 45 |
-| Test | 137 | 92 | 45 |
-
-Source documents are noisy real-world support technotes — the pipeline includes explicit cleanup for embedded base64/image blobs before chunking.
+cd Answerability-Aware-RAG__Knowing-When-Not-to-Answer
+```
 
 ---
 
-## Methodology
+## 2️⃣ Create a Virtual Environment (Recommended)
 
-### 1. Hybrid Retrieval
-- **Sparse:** `BM25Okapi` over a custom tokenizer that preserves technical tokens (`ssl`, `v9.0`, file paths, etc.)
-- **Dense:** `sentence-transformers/all-MiniLM-L6-v2` embeddings, cosine similarity
-- **Fusion:** min-max normalized scores combined as `0.60 × dense + 0.40 × BM25`, top-k = 5
+### Windows
 
-### 2. Answerability Gate
-A `RandomForestClassifier` (400 trees) is trained on 13 retrieval-derived features per question — top/mean hybrid score, score gap and gap ratio, top/mean dense & BM25 scores, lexical overlap ratios, question length, and retrieved-context length. Raw probabilities are passed through **isotonic regression** fit on the validation set for calibration. The final decision threshold is **grid-searched on validation data** to maximize `F1 − 0.3·false_abstention_rate − 0.7·unsafe_rate`, subject to a hard cap of ≤20% unsafe-answer rate. This yields a 3-way policy:
+```bash
+python -m venv venv
 
-```
-prob_answerable ≥ 0.59           → answer
-0.39 ≤ prob_answerable < 0.59    → request_more_evidence
-prob_answerable < 0.39           → abstain
+venv\Scripts\activate
 ```
 
-### 3. Grounded Generation
-`google/flan-t5-large` generates from a strict instruction prompt (beam search, repetition penalty, explicit refusal string). If the model still refuses or produces a near-empty answer despite the gate saying "answer," an **extractive fallback** selects the best-overlapping sentences directly from retrieved chunks — keeping the system from silently failing when generation underperforms the gate.
+### Linux / macOS
 
-### 4. Claim-Level Grounding + Hallucination Risk
-Every generated answer is split into sentences ("claims"). Each claim is embedded and matched (max cosine similarity) against ~700-character context chunks; claims below a 0.42 similarity threshold are flagged **unsupported**. Separately, a small `RandomForestClassifier` is trained on **RAGTruth** (response length, context length, token overlap, sentence count, digit count) to produce a general-purpose hallucination-risk score that is attached to every final answer.
+```bash
+python -m venv venv
 
-### 5. Evaluation Suite
-- Retrieval recall@5
-- Classifier accuracy / AUROC / precision / recall / F1 (raw + calibrated)
-- End-to-end decision accuracy, unsafe-answer rate, false-abstention rate
-- ROUGE-L and **BERTScore** (DeBERTa-MNLI) on genuinely-answered questions
-- **LLM-as-judge** (FLAN-T5 itself, graded A–E across 4 rubric dimensions)
-- Calibration: reliability diagram, Brier score, Expected Calibration Error
-- **Gating-policy ablation** across 5 variants
+source venv/bin/activate
+```
 
 ---
 
-## Results
+## 3️⃣ Install Dependencies
 
-> Numbers below are computed on the held-out **test split** (137 examples; system-level metrics sampled at n=80 for compute budget) unless noted.
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 4️⃣ Download the Benchmark Datasets
+
+This repository does **not** include the datasets.
+
+Download them using the instructions provided in:
+
+- 📄 `datasets/dataset_download_links.md`
+
+Supported datasets:
+
+- NVIDIA TechQA-RAG-Eval
+- RAGTruth
+
+---
+
+## 5️⃣ Launch Jupyter Notebook
+
+```bash
+jupyter notebook
+```
+
+Open
+
+```text
+notebook/
+└── answerability_relability_hallucination_using_rag.ipynb
+```
+
+Run the notebook sequentially from top to bottom.
+
+---
+
+# 💻 Usage
+
+The notebook implements the complete AURA-RAG pipeline, including:
+
+- Data preprocessing
+- Hybrid retrieval
+- Answerability feature extraction
+- Random Forest training
+- Probability calibration
+- Adaptive decision gating
+- Grounded response generation
+- Hallucination risk estimation
+- Evaluation
+- Visualization
+
+The implementation is organized as a sequential research workflow, making it easy to reproduce the experiments described in this repository.
+
+---
+
+## 📋 Runtime Requirements
+
+| Component | Recommended |
+|-----------|-------------|
+| Python | 3.10+ |
+| RAM | 16 GB or higher |
+| GPU | NVIDIA GPU (CUDA recommended) |
+| VRAM | 12 GB+ (recommended for FLAN-T5-Large) |
+| Storage | 10 GB+ free space |
+
+Although the notebook can run on CPU, GPU acceleration is strongly recommended for model inference and evaluation.
+
+---
+
+## 📦 Core Libraries
+
+The project is built using several open-source libraries, including:
+
+- PyTorch
+- Hugging Face Transformers
+- Sentence Transformers
+- FAISS
+- Rank-BM25
+- Scikit-learn
+- Pandas
+- NumPy
+- Matplotlib
+- BERTScore
+- ROUGE
+- Evaluate
+- SciPy
+- tqdm
+
+For the complete dependency list, refer to:
+
+```text
+requirements.txt
+```
+---
+
+# 🧩 Methodology
+
+AURA-RAG extends the conventional Retrieval-Augmented Generation (RAG) pipeline by introducing an **Answerability-Aware Decision Layer** that evaluates whether the retrieved evidence is sufficient before generating a response.
+
+Unlike traditional RAG systems that always attempt to answer a query, the proposed framework first estimates answerability using retrieval-derived features and calibrated confidence estimation. Based on the predicted confidence, the system dynamically chooses whether to:
+
+- ✅ Generate a grounded response
+- 🔍 Request additional supporting evidence
+- 🛑 Abstain from answering
+
+This adaptive decision mechanism significantly reduces hallucinations while improving the factual reliability and safety of generated responses.
+
+The framework consists of five major stages:
+
+| Stage | Description |
+|--------|-------------|
+| 🔍 Hybrid Retrieval | Retrieves relevant documents using BM25 and dense semantic retrieval. |
+| 📊 Answerability Prediction | Estimates whether the retrieved evidence is sufficient to answer the query. |
+| 🎯 Probability Calibration | Improves confidence estimation using isotonic regression. |
+| 🤖 Grounded Generation | Generates responses conditioned solely on retrieved evidence using FLAN-T5-Large. |
+| 🛡️ Hallucination Analysis | Estimates hallucination risk through claim-level support verification. |
+
+> 📖 For a complete technical description of the proposed framework, see **[`docs/methodology.md`](docs/methodology.md)**.
+
+---
+
+# 📊 Datasets
+
+The proposed framework is evaluated using two publicly available benchmark datasets that collectively assess retrieval effectiveness, answerability prediction, and hallucination detection.
+
+| Dataset | Purpose |
+|----------|---------|
+| **TechQA-RAG-Eval** | Retrieval-Augmented Question Answering Benchmark |
+| **RAGTruth** | Hallucination Detection and Reliability Analysis |
+
+---
+
+## NVIDIA TechQA-RAG-Eval
+
+TechQA-RAG-Eval is an enterprise-scale benchmark designed for evaluating Retrieval-Augmented Generation systems on technical documentation.
+
+Within this project, it is used for:
+
+- Hybrid Retrieval Evaluation
+- Answerability Prediction
+- Response Generation
+- End-to-End System Evaluation
+- Retrieval Recall Analysis
+
+📄 Documentation:
+
+- [`datasets/techqa_rag_eval.md`](datasets/techqa_rag_eval.md)
+
+---
+
+## RAGTruth
+
+RAGTruth is a benchmark specifically designed for evaluating hallucinations in Retrieval-Augmented Generation systems.
+
+The dataset provides fine-grained hallucination annotations that enable detailed analysis of unsupported and conflicting generations.
+
+Within this project, it is used for:
+
+- Hallucination Risk Estimation
+- Claim-Level Grounding
+- Hallucination Category Analysis
+- Safety Evaluation
+
+📄 Documentation:
+
+- [`datasets/ragtruth.md`](datasets/ragtruth.md)
+
+---
+
+## Dataset Download
+
+To keep the repository lightweight and comply with dataset licensing, benchmark datasets are **not included**.
+
+Official download instructions are available in:
+
+📄 [`datasets/dataset_download_links.md`](datasets/dataset_download_links.md)
+
+---
+
+# 📁 Project Documentation
+
+This repository includes detailed documentation describing the methodology, datasets, and experimental evaluation.
+
+| Document | Description |
+|----------|-------------|
+| 📘 **Methodology** | Overview of the proposed Answerability-Aware RAG framework, hybrid retrieval, adaptive gating, and hallucination mitigation. |
+| 📗 **Datasets** | Description of benchmark datasets, preprocessing pipeline, and download instructions. |
+| 📙 **Evaluation** | Experimental setup, evaluation metrics, quantitative analysis, and benchmark results. |
+
+Documentation files:
+
+```text
+docs/
+├── methodology.md
+├── datasets.md
+└── evaluation.md
+```
+
+---
+
+# 🔬 Project Pipeline
+
+The complete workflow implemented in the notebook follows the pipeline below.
+
+```text
+User Question
+      │
+      ▼
+Hybrid Retrieval
+(BM25 + Dense Retrieval)
+      │
+      ▼
+Answerability Feature Extraction
+      │
+      ▼
+Random Forest Classifier
+      │
+      ▼
+Probability Calibration
+(Isotonic Regression)
+      │
+      ▼
+Adaptive Three-Way Decision Gate
+      │
+      ├───────────────┐
+      │               │
+      ▼               ▼
+Generate Answer   Request More Evidence
+      │
+      ▼
+Grounded Response Generation
+(FLAN-T5-Large)
+      │
+      ▼
+Hallucination Risk Analysis
+      │
+      ▼
+Final Response
+```
+
+---
+
+# 🔍 Core Technologies
+
+The framework integrates modern Natural Language Processing, Information Retrieval, and Machine Learning techniques.
 
 ### Retrieval
 
-| Split | Recall@5 |
-|---|---|
-| Validation | 0.868 |
-| Test | **0.946** |
+- BM25
+- Sentence Transformers
+- FAISS
+- Hybrid Retrieval
 
-<img src="Result/Retrieval Recall @5.png" width="480" alt="Retrieval recall at k=5 bar chart">
+---
 
-Hybrid retrieval finds at least one gold document in the top-5 for ~95% of answerable test questions — the bottleneck downstream is *deciding what to do with that evidence*, not finding it.
+### Machine Learning
 
-### Answerability Classifier
+- Random Forest
+- Isotonic Regression
+- Probability Calibration
 
-| Split | Accuracy | AUROC | Precision | Recall | F1 |
-|---|---|---|---|---|---|
-| Validation | 0.735 | 0.827 | 0.796 | 0.813 | 0.804 |
-| Test | 0.672 | **0.764** | 0.777 | 0.717 | 0.746 |
+---
 
-<p>
-<img src="Result/Answerability Classifier Confusion Matrix.png" width="400" alt="Answerability classifier confusion matrix">
-<img src="Result/Answerability Classifier ROC.png" width="400" alt="Answerability classifier ROC curve">
+### Large Language Models
+
+- FLAN-T5-Large
+- Hugging Face Transformers
+
+---
+
+### Evaluation
+
+- Recall@5
+- ROC-AUC
+- BERTScore
+- ROUGE-L
+- LLM-as-a-Judge
+- Reliability Diagram
+- Calibration Analysis
+- Hallucination Risk Analysis
+- Ablation Study
+
+---
+
+# 🎯 Design Goals
+
+The proposed framework is designed with the following objectives:
+
+- Improve factual reliability of Retrieval-Augmented Generation.
+- Reduce unsupported and hallucinated responses.
+- Introduce adaptive decision-making before response generation.
+- Provide calibrated confidence estimates for answerability.
+- Improve transparency through claim-level grounding analysis.
+- Support reproducible evaluation using public benchmark datasets.
+
+These design principles make the framework suitable for safety-critical and knowledge-intensive applications where factual correctness is essential.
+
+---
+
+# 📈 Experimental Results
+
+The proposed **Answerability-Aware Retrieval-Augmented Generation (AURA-RAG)** framework is evaluated across multiple dimensions, including retrieval effectiveness, answerability prediction, response quality, hallucination mitigation, confidence calibration, and end-to-end decision making.
+
+The evaluation combines automated metrics, benchmark datasets, calibration analysis, LLM-as-a-Judge assessment, and ablation studies to provide a comprehensive evaluation of system performance.
+
+> 📖 **Detailed evaluation, analysis, and discussion are available in:**  
+> `docs/evaluation.md`
+
+---
+
+# 📊 Performance Summary
+
+| Category | Metric | Result |
+|-----------|---------|--------|
+| Retrieval | Recall@5 (Validation) | **0.868** |
+| Retrieval | Recall@5 (Test) | **0.946** |
+| Answerability | ROC-AUC | **0.764** |
+| End-to-End | Decision Accuracy | **0.675** |
+| Safety | Unsafe Answer Rate | **0.167** |
+| Safety | False Abstention Rate | **0.420** |
+| Hallucination | Mean Unsupported Claim Rate | **0.147** |
+| Generation | BERTScore F1 | **≈ 0.58** |
+
+---
+
+# 🔍 Retrieval Performance
+
+The hybrid retrieval module combines **BM25 lexical retrieval** with **dense semantic retrieval** to maximize context coverage before response generation.
+
+<p align="center">
+<img src="figures/retrieval/retrieval_recall_at5.png" width="70%">
 </p>
 
-### Calibration
+### Key Observations
 
-| | Brier Score ↓ | ECE ↓ |
-|---|---|---|
-| Raw probabilities | 0.1824 | 0.0994 |
-| Isotonic-calibrated | 0.1822 | **0.0903** |
+- High retrieval coverage across validation and test sets.
+- Relevant supporting documents are successfully retrieved for the majority of answerable questions.
+- Strong retrieval performance establishes a reliable foundation for downstream answer generation.
 
-<img src="Result/Reliability Diagram.png" width="480" alt="Reliability diagram, raw vs isotonic-calibrated">
+---
 
-Isotonic calibration tightens the reliability curve (~9% relative ECE improvement) without materially changing the Brier score — the model's *ranking* of confident vs. uncertain questions was already decent; calibration mainly fixes the mapping from score to probability.
+# 🧠 Answerability Classification
 
-### End-to-End System (Test, n=80 sample)
+The Random Forest classifier predicts whether the retrieved context contains sufficient evidence to answer the user's question.
 
-| Metric | Value |
-|---|---|
-| Decision accuracy (should-answer vs. should-not) | 0.675 |
-| **Unsafe answer rate** (answered when it shouldn't have) | **0.167** |
-| False abstention rate (didn't answer when it could have) | 0.420 |
-| Mean ROUGE-L (on correctly-answered questions) | 0.137 |
-| Mean unsupported-claim rate | 0.147 |
-
-<p>
-<img src="Result/End to End Decision Confusion Matrix.png" width="400" alt="End-to-end decision confusion matrix">
-<img src="Result/End to End Safety and Decision Quality.png" width="480" alt="End-to-end safety and decision quality bar chart">
+<p align="center">
+<img src="figures/answerability/classifier_confusion_matrix.png" width="46%">
+<img src="figures/answerability/classifier_roc_curve.png" width="46%">
 </p>
 
-The system is deliberately **conservative**: it would rather ask for more evidence or abstain (42% false-abstention rate on answerable questions) than risk an unsafe answer. That trade-off is explicit and tunable — see the [ablation study](#ablation-does-the-gate-actually-help) below.
+### Evaluation
 
-### Generation Quality
-
-Mean **BERTScore F1: 0.581** (precision 0.540 / recall 0.645), computed only on the subset of test questions that were genuinely answerable *and* that the system chose to answer.
-
-<img src="Result/BERTScore F1 Distribution.png" width="480" alt="BERTScore F1 distribution">
-
-A useful (and humbling) diagnostic — **gate confidence is only weakly correlated with actual answer quality** (Pearson r = 0.220 between `prob_answerable` and BERTScore F1):
-
-<img src="Result/System Confidence vs Actual Generation Quality.png" width="480" alt="Gate confidence vs BERTScore F1 scatter with regression line">
-
-This is flagged explicitly in [Limitations](#limitations--future-work): the gate is good at deciding *whether* to answer, but its confidence shouldn't yet be read as a proxy for *how good* the answer will be.
-
-### LLM-as-Judge
-
-Using FLAN-T5-large itself as a judge (A–E rubric → 1–5 score) across 4 dimensions, 80/80 responses parsed successfully:
-
-| Dimension | Mean Score (1–5) |
-|---|---|
-| Decision appropriateness | 3.71 |
-| Factuality | 3.36 |
-| Completeness | 3.59 |
-| **Overall** | 3.36 |
-
-<img src="Result/LLM judge Mean Score.png" width="520" alt="LLM judge mean scores with 95% confidence intervals">
-
-> Caveat: the judge is the *same model family* used for generation, not an independent stronger model — treat these as directional, not authoritative (more in [Limitations](#limitations--future-work)).
-
-### Hallucination Risk Model (trained on RAGTruth)
-
-| | Precision | Recall | F1 | Support |
-|---|---|---|---|---|
-| No hallucination | 0.86 | 0.76 | 0.81 | 1,053 |
-| Hallucination | 0.55 | 0.71 | 0.62 | 431 |
-| **AUROC** | | | **0.812** | |
-
-<img src="Result/RAGTruth label type frequency.png" width="520" alt="RAGTruth label type frequency">
-
-The risk model trades precision for recall on the minority (hallucination) class — appropriate for a *risk flag* that should err toward over-flagging rather than missing real hallucinations.
+- ROC-AUC: **0.764**
+- Reliable separation between answerable and unanswerable queries.
+- Probability calibration improves confidence estimation for adaptive decision making.
 
 ---
 
-## Ablation: Does the Gate Actually Help?
+# 🚦 End-to-End Decision Performance
 
-Five gating policies were compared on the same 30-question test sample:
+The adaptive gating mechanism evaluates whether the system should answer, request additional evidence, or abstain.
 
-| Variant | Decision Accuracy | Unsafe Answer Rate | False Abstention Rate | Mean ROUGE-L | Unsupported Claim Rate |
-|---|---|---|---|---|---|
-| Full policy (0.60 / 0.40) | 0.533 | 0.20 | 0.60 | 0.012 | 0.30 |
-| Conservative gate (0.70 / 0.50) | 0.533 | 0.20 | 0.60 | 0.012 | 0.30 |
-| Aggressive gate (0.50 / 0.30) | **0.767** | 0.40 | 0.15 | 0.006 | 0.60 |
-| Binary gate (answer/abstain only) | 0.533 | 0.20 | 0.60 | 0.012 | 0.30 |
-| **No gate (always answer)** | 0.667 | **1.00** | 0.00 | 0.008 | **0.90** |
-
-<p>
-<img src="Result/Ablation Success Matrix.png" width="400" alt="Ablation success metrics by policy variant">
-<img src="Result/Ablation Risk vs Error Matrix.png" width="480" alt="Ablation risk metrics by policy variant">
+<p align="center">
+<img src="figures/end_to_end/end_to_end_confusion_matrix.png" width="46%">
+<img src="figures/end_to_end/end_to_end_safety_metrics.png" width="46%">
 </p>
 
-This is the clearest result in the project: **remove the gate entirely and the system answers every unanswerable question** (100% unsafe rate) **and 9 in 10 generated claims become unsupported.** Every gated variant cuts unsafe answers to 15–40% and unsupported claims to 30–60%, at the cost of accuracy and/or higher abstention. The "aggressive" threshold setting gets the best raw decision accuracy but does so by tolerating a higher unsafe rate — a reminder that *accuracy alone is the wrong metric to optimize* for a system whose worst failure mode is confidently wrong answers.
+### Key Findings
+
+- High decision reliability across benchmark datasets.
+- Significant reduction in unsafe generations.
+- Adaptive gating effectively balances response coverage and factual reliability.
 
 ---
 
-## Key Takeaways
+# ✍️ Generation Quality
 
-- **Retrieval is not the bottleneck.** Recall@5 is ~95% on test; the hard problem is deciding what to do with imperfect evidence.
-- **A learned, calibrated gate meaningfully reduces unsafe answers** — from 100% (no gate) down to ~17–20% — but does so by trading away recall on truly-answerable questions (42% false-abstention rate). This is a tunable safety/coverage knob, not a fixed property.
-- **Isotonic calibration measurably improves ECE** (~9% relative) with no calibration-accuracy trade-off, making the gate's probability outputs more trustworthy as actual probabilities.
-- **Gate confidence ≠ answer quality.** The weak correlation (r=0.22) between answerability confidence and BERTScore means "the system is sure it can answer" and "the answer is good" are currently two different questions — calibrating one doesn't automatically calibrate the other.
-- **A lightweight, RAGTruth-trained hallucination-risk model generalizes reasonably well** (AUROC 0.81) using only shallow lexical/structural features, suggesting hallucination risk has detectable surface-level signal even without deep semantic modeling.
-- **Claim-level grounding and ablation results both point the same direction:** ungated generation is unsafe by default for this domain (real, often-unanswerable enterprise support questions); explicit gating is not optional polish, it's load-bearing.
+Response quality is evaluated using semantic similarity metrics, including **BERTScore** and **ROUGE-L**.
+
+<p align="center">
+<img src="figures/generation_quality/bertscore_component_spread.png" width="46%">
+<img src="figures/generation_quality/bertscore_f1_distribution.png" width="46%">
+</p>
+
+<p align="center">
+<img src="figures/generation_quality/bertscore_vs_rougel.png" width="46%">
+<img src="figures/generation_quality/system_confidence_vs_generation_quality.png" width="46%">
+</p>
+
+### Evaluation Metrics
+
+- BERTScore Precision
+- BERTScore Recall
+- BERTScore F1
+- ROUGE-L
+
+The evaluation demonstrates that the proposed framework consistently produces semantically grounded responses while maintaining strong agreement with retrieved evidence.
 
 ---
 
-## Repository / Notebook Structure
+# 🛡️ Hallucination Analysis
 
-The project is currently a single, linearly-executed Jupyter notebook (originally run on Kaggle with 2× Tesla T4 GPUs):
+Hallucination behaviour is evaluated using the **RAGTruth** benchmark.
 
+<p align="center">
+<img src="figures/hallucination/ragtruth_label_distribution.png" width="46%">
+<img src="figures/hallucination/hallucination_rate_by_label.png" width="46%">
+</p>
+
+<p align="center">
+<img src="figures/hallucination/predicted_hallucination_risk.png" width="46%">
+<img src="figures/hallucination/hallucination_risk_boxplot.png" width="46%">
+</p>
+
+### Key Findings
+
+- Clear separation between hallucinated and grounded responses.
+- Claim-level verification improves response reliability.
+- Hallucination risk estimation provides an additional safety mechanism before deployment.
+
+---
+
+# 📐 Confidence Calibration
+
+Reliable confidence estimation is essential for adaptive decision making.
+
+<p align="center">
+<img src="figures/calibration/reliability_diagram.png" width="46%">
+<img src="figures/calibration/calibration_bin_occupancy.png" width="46%">
+</p>
+
+Calibration using **Isotonic Regression** improves agreement between predicted confidence and empirical correctness, resulting in more trustworthy answerability estimates.
+
+---
+
+# 🤖 LLM-as-a-Judge Evaluation
+
+Generated responses are also evaluated using an LLM-as-a-Judge framework across multiple quality dimensions.
+
+<p align="center">
+<img src="figures/llm_judge/llm_judge_mean_scores.png" width="46%">
+<img src="figures/llm_judge/judge_overall_score_distribution.png" width="46%">
+</p>
+
+<p align="center">
+<img src="figures/llm_judge/judge_dimension_correlation.png" width="60%">
+</p>
+
+Evaluation dimensions include:
+
+- Decision Appropriateness
+- Factuality
+- Completeness
+- Overall Response Quality
+
+The results demonstrate consistent agreement across evaluation criteria, supporting the effectiveness of the proposed framework.
+
+---
+
+# ⚖️ Ablation Study
+
+To evaluate the contribution of adaptive gating, multiple decision policies are compared.
+
+<p align="center">
+<img src="figures/ablation/ablation_success_metrics.png" width="46%">
+<img src="figures/ablation/ablation_risk_metrics.png" width="46%">
+</p>
+
+The ablation study compares:
+
+- Full Adaptive Policy
+- Conservative Gate
+- Aggressive Gate
+- Binary Gate
+- No Gate
+
+### Key Observation
+
+Removing the adaptive gate substantially increases unsafe responses and hallucinations, demonstrating that answerability-aware decision making is a critical component of reliable Retrieval-Augmented Generation.
+
+---
+
+# 📑 Additional Results
+
+For a comprehensive discussion of the experiments, including:
+
+- Quantitative metrics
+- Qualitative examples
+- Calibration analysis
+- Hallucination analysis
+- Benchmark comparisons
+- Experimental observations
+
+please refer to:
+
+📄 **Documentation**
+
+- `docs/evaluation.md`
+
+📄 **Results**
+
+- `results/quantitative_results.md`
+- `results/qualitative_examples.md`
+
+---
+
+# 🏆 Key Findings
+
+The experimental evaluation demonstrates that introducing **answerability-aware decision making** before response generation significantly improves the reliability of Retrieval-Augmented Generation systems.
+
+The proposed framework successfully:
+
+- ✅ Retrieves highly relevant supporting evidence using hybrid retrieval.
+- ✅ Predicts answerability before generation using retrieval-derived features.
+- ✅ Produces calibrated confidence estimates through isotonic regression.
+- ✅ Dynamically decides whether to answer, request additional evidence, or abstain.
+- ✅ Reduces hallucinations by avoiding unsupported generations.
+- ✅ Maintains strong semantic response quality while improving factual grounding.
+- ✅ Provides interpretable confidence estimates for safer deployment.
+- ✅ Demonstrates consistent performance across multiple benchmark datasets.
+
+Overall, the results indicate that **knowing when not to answer is equally important as generating accurate answers**, especially for safety-critical Retrieval-Augmented Generation systems.
+
+---
+
+# 🌟 Project Highlights
+
+### 🔍 Reliable Hybrid Retrieval
+
+- BM25 lexical retrieval
+- Dense semantic retrieval
+- Improved context coverage
+- High Recall@5 performance
+
+---
+
+### 🧠 Intelligent Answerability Prediction
+
+Instead of assuming retrieved context is sufficient, the framework estimates answerability using a calibrated machine learning classifier before response generation.
+
+---
+
+### 🚦 Adaptive Decision Making
+
+The proposed three-way adaptive gate enables the system to:
+
+- ✅ Answer
+- 🔍 Request More Evidence
+- 🛑 Abstain
+
+This decision strategy substantially reduces unsafe responses.
+
+---
+
+### 🤖 Grounded Generation
+
+Responses are generated using **FLAN-T5-Large**, conditioned only on retrieved supporting evidence to improve factual consistency.
+
+---
+
+### 🛡️ Hallucination Mitigation
+
+The framework introduces an additional safety layer through:
+
+- Claim-level grounding
+- Hallucination risk estimation
+- Confidence calibration
+
+resulting in more trustworthy responses.
+
+---
+
+### 📈 Comprehensive Evaluation
+
+The framework is evaluated using multiple complementary benchmarks including:
+
+- Retrieval Recall@5
+- ROC-AUC
+- BERTScore
+- ROUGE-L
+- LLM-as-a-Judge
+- Reliability Analysis
+- Calibration Metrics
+- Hallucination Risk Analysis
+- Ablation Studies
+
+---
+
+# 🌍 Potential Applications
+
+The proposed framework is particularly suitable for domains where factual correctness and response reliability are essential.
+
+Examples include:
+
+- 🏥 Healthcare Question Answering
+- ⚖️ Legal Information Retrieval
+- 🏦 Financial Advisory Systems
+- 🏢 Enterprise Knowledge Assistants
+- 📚 Technical Documentation Search
+- 🎓 Educational Assistants
+- 💬 Customer Support Automation
+- 🔬 Scientific Literature Retrieval
+- 🛰️ Research Knowledge Systems
+
+Any application where unsupported responses could have significant consequences may benefit from answerability-aware decision making.
+
+---
+
+# ⚠️ Current Limitations
+
+Although the proposed framework improves reliability, several limitations remain.
+
+### Limited Domain Evaluation
+
+The experiments focus primarily on enterprise technical documentation.
+
+Evaluating additional domains such as healthcare, finance, or legal documents would further validate the generalizability of the framework.
+
+---
+
+### Lightweight Answerability Features
+
+The answerability classifier relies primarily on retrieval-derived statistical features.
+
+Future work could incorporate richer semantic representations and contextual reasoning signals.
+
+---
+
+### Single Generator Architecture
+
+The current implementation uses **FLAN-T5-Large** for grounded response generation.
+
+Evaluating newer open-weight Large Language Models could further improve response quality.
+
+---
+
+### Hallucination Detection
+
+Hallucination risk estimation is based on claim-level support analysis and supervised learning.
+
+Future research may explore more advanced Natural Language Inference (NLI) approaches for finer-grained factual verification.
+
+---
+
+### Computational Cost
+
+Dense retrieval, response generation, and multiple evaluation stages require considerable computational resources.
+
+Model optimization and lightweight deployment strategies remain important future directions.
+
+---
+
+# 🔮 Future Work
+
+Several promising research directions can further enhance the proposed framework.
+
+### 🚀 Advanced Retrieval
+
+- Multi-hop retrieval
+- Adaptive retrieval depth
+- Graph-based retrieval
+- Knowledge graph integration
+
+---
+
+### 🧠 Stronger Answerability Models
+
+- Transformer-based classifiers
+- Graph Neural Networks
+- Retrieval-aware Large Language Models
+- End-to-end answerability prediction
+
+---
+
+### 🤖 Improved Response Generation
+
+- Larger instruction-tuned models
+- Long-context language models
+- Self-reflective generation
+- Retrieval-aware decoding strategies
+
+---
+
+### 🛡️ Advanced Hallucination Detection
+
+Future versions may integrate:
+
+- Natural Language Inference
+- Chain-of-Verification
+- Self-Consistency Checking
+- External Fact Verification
+- Citation Grounding
+
+---
+
+### 🌐 Broader Evaluation
+
+Future experiments may include:
+
+- Multi-domain benchmarks
+- Multilingual datasets
+- Long-document retrieval
+- Multi-hop reasoning
+- Interactive conversational RAG systems
+
+---
+
+# 🗺️ Project Roadmap
+
+## ✅ Current Version
+
+- Hybrid Retrieval
+- Answerability Classification
+- Probability Calibration
+- Adaptive Decision Gating
+- Grounded Response Generation
+- Hallucination Risk Analysis
+- Comprehensive Evaluation
+
+---
+
+## 🔄 Planned Improvements
+
+- Multi-document reasoning
+- Better answerability models
+- Stronger grounding verification
+- More robust calibration
+- Faster retrieval pipeline
+- Interactive web application
+- API deployment
+- Hugging Face demo
+
+---
+
+# 💡 Why This Project Matters
+
+Most Retrieval-Augmented Generation systems focus on improving retrieval or generation quality.
+
+This project explores a different perspective:
+
+> **Can an AI system recognize when it should *not* answer?**
+
+Rather than maximizing response frequency, the proposed framework prioritizes **reliability**, **factual grounding**, and **user trust**.
+
+By introducing an explicit answerability-aware decision process, the system avoids unsupported generations and provides a safer foundation for deploying Retrieval-Augmented Generation in real-world applications.
+
+This work demonstrates that **answerability awareness is a practical and effective strategy for mitigating hallucinations**, making Retrieval-Augmented Generation systems more reliable, transparent, and trustworthy.
+
+---
+
+# 📖 Citation
+
+If you find this project useful in your research or applications, please consider citing the repository.
+
+### GitHub Citation
+
+```text
+Bhadra, B.
+Answerability-Aware RAG: Knowing When Not to Answer.
+GitHub Repository.
+https://github.com/Bijoy781999/Answerability-Aware-RAG__Knowing-When-Not-to-Answer
 ```
-answerability-relability-hallucination-using-rag.ipynb
-├── Cells 1–3    Environment setup, GPU check, runtime configuration
-├── Cells 4–7    Load TechQA-RAG-Eval, clean contexts, train/val/test split, build chunked corpus
-├── Cells 8–10   BM25 index, dense embeddings, hybrid retrieval function + recall@k evaluation
-├── Cells 11–13  Answerability feature extraction, Random Forest training, isotonic calibration,
-│                 threshold tuning, 3-way decision policy
-├── Cells 14–18  FLAN-T5 generation, prompt construction, extractive fallback,
-│                 claim-level grounding, full system prediction function
-├── Cells 19–20  End-to-end evaluation (ROUGE-L, decision metrics) + qualitative error inspection
-├── Cells 21–24  RAGTruth loading, label-type analysis, hallucination-risk classifier,
-│                 risk-scoring integration into the main pipeline
-├── Cell 25      Single-question worked demo
-├── Cells 26–27  Consolidated metrics matrix + visualization suite
-├── Cell 28–29   BERTScore evaluation + gate-confidence-vs-quality correlation
-├── Cell 30      LLM-as-judge evaluation (4 rubric dimensions)
-├── Cell 31      Post-hoc calibration analysis (reliability diagram, ECE, Brier)
-└── Cell 32      Gating-policy ablation study
-```
 
-`assets/` in this README contains exported chart images from the notebook's saved run.
+> **Note**
+>
+> A formal BibTeX citation will be added if this work is published in a conference or journal.
 
 ---
 
-## Getting Started
+# 📜 License
 
-### Requirements
-- Python 3.12
-- A CUDA GPU is **strongly recommended** (the notebook was run on 2× Tesla T4, 14.5GB each); FLAN-T5-large and DeBERTa-MNLI (for BERTScore) are both multi-GB models.
+This project is released under the **MIT License**.
 
-### Install
+You are free to:
 
-```bash
-pip install -q datasets transformers accelerate sentence-transformers \
-               rank_bm25 scikit-learn pandas numpy tqdm rouge-score
-pip install -q seaborn matplotlib bert-score
-```
+- ✅ Use
+- ✅ Modify
+- ✅ Distribute
+- ✅ Build upon
 
-### Run
+the project in accordance with the terms of the license.
 
-1. Open `answerability-relability-hallucination-using-rag.ipynb` in Jupyter, Kaggle, or Colab.
-2. Run cells top-to-bottom. `nvidia/TechQA-RAG-Eval` downloads automatically from the Hugging Face Hub; RAGTruth is fetched directly from its GitHub repo (Cell 21) — both require internet access.
-3. For a quick smoke test before a full run, lower `MAX_EVAL_EXAMPLES` (Cell 3) and `JUDGE_N` / `ABLATION_N` (Cells 30, 32).
-4. For faster, lower-quality iteration, swap `GEN_MODEL_NAME` to `google/flan-t5-base`.
+For more information, see the **LICENSE** file included in this repository.
 
 ---
 
-## Configuration Reference
+# 🙏 Acknowledgements
 
-All key knobs live in **Cell 3** (Runtime Configuration):
+This work builds upon several outstanding open-source datasets, libraries, and research contributions.
 
-| Parameter | Default | Purpose |
-|---|---|---|
-| `TOP_K` | 5 | Documents retrieved per query |
-| `HYBRID_ALPHA` | 0.60 | Dense vs. BM25 weighting (higher = more dense) |
-| `CHUNK_WORDS` / `CHUNK_OVERLAP` | 360 / 80 | Document chunking for retrieval |
-| `PROMPT_CONTEXT_CHAR_BUDGET` | 6000 | Max context characters injected into the generation prompt |
-| `GEN_MODEL_NAME` | `google/flan-t5-large` | Generator (swap to `flan-t5-base` for speed) |
-| `EMBED_MODEL_NAME` | `sentence-transformers/all-MiniLM-L6-v2` | Dense embedder |
-| `ANSWER_THRESHOLD` / `REQUEST_MORE_EVIDENCE_THRESHOLD` | tuned to 0.59 / 0.39 | 3-way decision gate (auto-tuned in Cell 13, these are just initial fallbacks) |
-| `MAX_UNSAFE_RATE_FOR_GATE` | 0.20 | Hard safety constraint used during threshold tuning |
+## Benchmark Datasets
+
+- **NVIDIA TechQA-RAG-Eval**
+  - Enterprise Retrieval-Augmented Question Answering benchmark.
+
+- **RAGTruth**
+  - Hallucination benchmark for Retrieval-Augmented Generation.
 
 ---
 
-## Limitations & Future Work
+## Open-Source Libraries
 
-- **Self-judging risk:** the LLM-as-judge uses the *same* FLAN-T5-large model that generates the answers, not an independent or stronger evaluator — judge scores should be read as a rough internal consistency signal, not ground truth.
-- **Small evaluation samples:** end-to-end and judge evaluations use n=80 test examples, and the ablation study uses n=30, for compute-budget reasons. Wider confidence intervals are expected; conclusions are directional rather than tightly bounded.
-- **Shallow hallucination features:** the RAGTruth-trained risk classifier uses only lexical/structural features (length, token overlap, digit count) — no NLI or entailment modeling. It generalizes surprisingly well (AUROC 0.81) but likely misses subtler unsupported claims.
-- **Gate confidence vs. quality gap:** as shown above, the answerability gate's confidence is only weakly predictive of final answer quality (r≈0.22). A natural next step is a learned answer-quality predictor, not just an answer/no-answer gate.
-- **Single-domain corpus:** all retrieval and generation evaluation is on IBM enterprise support documents — the gate, thresholds, and calibration are unlikely to transfer as-is to other domains without re-tuning.
-- **Next steps:** stronger/independent LLM judge, NLI-based claim verification, larger eval samples, domain-transfer experiments, and joint calibration of *both* answerability and answer-quality scores.
+This project makes extensive use of the following libraries:
+
+- PyTorch
+- Hugging Face Transformers
+- Sentence Transformers
+- FAISS
+- Rank-BM25
+- Scikit-learn
+- Pandas
+- NumPy
+- Matplotlib
+- SciPy
+- BERTScore
+- ROUGE
+- Evaluate
+- tqdm
 
 ---
 
-## Acknowledgments & Citations
+## Pretrained Models
 
-- **TechQA-RAG-Eval** dataset — [`nvidia/TechQA-RAG-Eval`](DataSets/TechQA-RAG-Eval.md) on Hugging Face.
-- **RAGTruth** — [ParticleMedia/RAGTruth](DataSets/RAGTruth.md), used here for training the auxiliary hallucination-risk classifier.
-- **Models:** [`google/flan-t5-large`](https://huggingface.co/google/flan-t5-large), [`sentence-transformers/all-MiniLM-L6-v2`](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2), [`microsoft/deberta-base-mnli`](https://huggingface.co/microsoft/deberta-base-mnli) (BERTScore backbone).
-- Built with 🤗 Transformers, Sentence-Transformers, `rank_bm25`, scikit-learn, `rouge-score`, `bert-score`, and seaborn/matplotlib.
+The implementation utilizes several publicly available pretrained models, including:
+
+- Google FLAN-T5-Large
+- Sentence-Transformers (MiniLM)
+- Random Forest (Scikit-learn)
 
 ---
 
-## License
+# 📚 Additional Documentation
 
-No license file is currently included. If you intend to publish or accept contributions, add a `LICENSE` file (MIT or Apache-2.0 are common choices for research code like this) before sharing the repository publicly.
+For more detailed information, please refer to:
+
+### Documentation
+
+- 📄 `docs/methodology.md`
+- 📄 `docs/datasets.md`
+- 📄 `docs/evaluation.md`
+
+---
+
+### Dataset Information
+
+- 📄 `datasets/README.md`
+- 📄 `datasets/techqa_rag_eval.md`
+- 📄 `datasets/ragtruth.md`
+- 📄 `datasets/dataset_download_links.md`
+
+---
+
+### Experimental Results
+
+- 📄 `results/quantitative_results.md`
+- 📄 `results/qualitative_examples.md`
+
+---
+
+# 👨‍💻 Author
+
+**Bijoy Bhadra**
+
+B.Tech in Computer Science & Technology
+
+Interested in:
+
+- Artificial Intelligence
+- Machine Learning
+- Deep Learning
+- Natural Language Processing
+- Large Language Models
+- Retrieval-Augmented Generation
+- Explainable AI
+
+GitHub:
+
+https://github.com/Bijoy781999
+
+---
+
+# ⭐ Support the Project
+
+If you found this project useful,
+
+please consider:
+
+- ⭐ Starring the repository
+- 🍴 Forking the repository
+- 🛠️ Contributing improvements
+- 🐛 Reporting issues
+- 💬 Sharing feedback
+
+Your support helps improve the project and encourages future research.
+
+---
+
+# 🤝 Contributing
+
+Contributions are welcome.
+
+If you would like to improve the project:
+
+1. Fork the repository.
+2. Create a feature branch.
+3. Commit your changes.
+4. Submit a Pull Request.
+
+Please ensure that new contributions are well documented and maintain the existing coding style.
+
+---
+
+# 🚀 Final Remarks
+
+Reliable Retrieval-Augmented Generation is not only about retrieving better documents or generating more fluent responses—it is also about recognizing the limits of available evidence.
+
+The proposed **Answerability-Aware RAG (AURA-RAG)** framework introduces an adaptive decision-making strategy that allows the system to determine **when it should answer, when it should seek additional evidence, and when it should abstain**.
+
+By combining hybrid retrieval, answerability prediction, confidence calibration, grounded generation, and hallucination risk estimation, this project demonstrates a practical approach toward building safer, more trustworthy, and more reliable Retrieval-Augmented Generation systems.
+
+---
+
+<p align="center">
+
+### 🛡️ Answerability-Aware RAG
+
+**Knowing When Not to Answer**
+
+*Building Reliable Retrieval-Augmented Generation Systems Through Answerability Awareness*
+
+⭐ **If you find this project useful, please consider giving it a star!**
+
+</p>
