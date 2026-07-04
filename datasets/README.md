@@ -25,9 +25,9 @@ The project is evaluated using two publicly available benchmark datasets:
 datasets/
 │
 ├── README.md
-├── techqa_rag_eval.md
+├── dataset_download_links.md
 ├── ragtruth.md
-└── dataset_download_links.md
+└── techqa_rag_eval.md
 ```
 
 ---
